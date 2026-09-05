@@ -196,7 +196,13 @@ Actions → Fetch PubMed papers → Run workflow에서 `lookback_days`를 크게
 
 **절대 건드리지 않는 것**: 북마크·메모·읽음 표시된 논문, 열람 기록에 있는 논문, 댓글이 달린 논문, 추천에 올라간 논문, AI 요약이 있는 논문.
 
-**조정**: Settings → Secrets and variables → Actions → **Variables** 탭에서 `PRUNE_KEEP_DAYS`(기본 365, 줄일수록 껍데기화가 공격적), `PRUNE_TARGET_MB`(기본 420). Admin 탭 개요에 사용 용량·보호 논문·초록 비운 논문 수가 표시됩니다.
+**조정**: Settings → Secrets and variables → Actions → **Variables** 탭에서 `PRUNE_KEEP_DAYS`(기본 365, 줄일수록 껍데기화가 공격적), `PRUNE_TARGET_MB`(기본 420), `PRUNE_BATCH`(기본 200).
+
+**중요 — 정리 후 용량이 안 줄어 보일 때**: PostgreSQL은 초록을 비우거나 행을 지워도 파일 크기가 즉시 줄지 않고 빈 공간으로 남겨 재사용합니다. 그래서 정리 직후 Admin의 사용 용량이 그대로일 수 있습니다. 실제로 회수하려면 SQL Editor에서 한 번 실행하세요(수 분 걸리고 그동안 쓰기가 잠깁니다):
+```sql
+vacuum (full, analyze) public.papers;
+```
+평소에는 굳이 필요 없습니다. 비운 공간을 새 논문이 다시 채우므로 용량이 더 늘지 않습니다. Admin 탭 개요에 사용 용량·보호 논문·초록 비운 논문 수가 표시됩니다.
 
 이 구조 덕분에 "자주 보는 논문만 초록을 갖고, 나머지는 목록만 유지"가 자동으로 이뤄집니다. 10만 편이라도 대부분 껍데기라면 100MB 안쪽이라, 무료 500MB로도 넓은 아카이브를 유지할 수 있습니다.
 

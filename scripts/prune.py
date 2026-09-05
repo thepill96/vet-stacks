@@ -1,14 +1,17 @@
 """
-DB 용량이 한계에 가까워지면 아무도 손대지 않은 오래된 논문부터 정리한다.
-수집(fetch) 직후 실행되며, 보호 대상(북마크·메모·읽음·열람기록·댓글·추천·AI 요약)은 절대 건드리지 않는다.
+용량 관리: 아무도 손대지 않은 오래된 논문의 초록을 비운다(껍데기만 남김).
+비워진 논문은 누군가 열면 PubMed에서 초록을 자동으로 되받아 온다.
 
-1단계: 오래된 미열람 논문의 초록만 비움 (행은 남아 목록·검색·링크 유지)
-2단계: 그래도 목표를 못 맞추면 그 논문들을 삭제 (필요하면 재수집으로 복구 가능)
+주의: PostgreSQL은 UPDATE/DELETE 직후 파일 크기가 바로 줄지 않는다(빈 공간으로 재사용됨).
+따라서 진행 판단은 '남은 후보 수'로 하고, 실제 용량 회수가 필요하면 SQL Editor에서
+  vacuum (full, analyze) public.papers;
+를 한 번 실행한다(수 분, 그동안 쓰기 잠김).
 
 환경변수:
   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  (필수)
-  PRUNE_TARGET_MB   목표 상한 (기본 420 = 무료 500MB의 84%)
+  PRUNE_TARGET_MB   목표 상한 (기본 420)
   PRUNE_KEEP_DAYS   이 기간 안에 발행된 논문은 보호 (기본 365)
+  PRUNE_BATCH       한 번에 처리할 편수 (기본 200, 시간 초과 시 자동으로 절반씩 축소)
 """
 import json, os, re, sys
 import requests
@@ -18,52 +21,68 @@ KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"].strip()
 H = {"apikey": KEY, "Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
 TARGET = int(os.environ.get("PRUNE_TARGET_MB") or 420) * 1024 * 1024
 KEEP_DAYS = int(os.environ.get("PRUNE_KEEP_DAYS") or 365)
-BATCH = 2000
+BATCH0 = int(os.environ.get("PRUNE_BATCH") or 200)
+MB = lambda b: f"{b / 1024 / 1024:.0f}MB"
 
 
-def rpc(fn, args=None):
-    r = requests.post(f"{SB}/rest/v1/rpc/{fn}", headers=H, data=json.dumps(args or {}), timeout=180)
+def rpc(fn, args=None, timeout=180):
+    r = requests.post(f"{SB}/rest/v1/rpc/{fn}", headers=H, data=json.dumps(args or {}), timeout=timeout)
     if r.status_code >= 300:
         raise RuntimeError(f"{fn}: {r.status_code} {r.text[:200]}")
     return r.json()
 
 
-def size():
-    return int(rpc("db_size_bytes"))
+def is_timeout(e):
+    return "57014" in str(e) or "timeout" in str(e).lower()
+
+
+def run_stage(fn, label):
+    """배치 크기를 조절해가며 더 처리할 것이 없을 때까지 반복."""
+    batch, total, misses = BATCH0, 0, 0
+    while True:
+        try:
+            n = int(rpc(fn, {"keep_days": KEEP_DAYS, "batch": batch}))
+        except RuntimeError as e:
+            if is_timeout(e) and batch > 25:
+                batch //= 2
+                print(f"[{label}] 시간 초과 → 배치 {batch}로 축소", flush=True)
+                continue
+            raise
+        if n == 0:
+            misses += 1
+            if misses >= 2:
+                break
+            continue
+        misses = 0
+        total += n
+        if total % (batch * 10) < batch:
+            print(f"[{label}] 누적 {total}편", flush=True)
+    return total
 
 
 def main():
-    mb = lambda b: f"{b / 1024 / 1024:.0f}MB"
+    size = lambda: int(rpc("db_size_bytes"))
     cur = size()
-    print(f"현재 용량 {mb(cur)} / 목표 {mb(TARGET)}")
+    left = int(rpc("prunable_count", {"keep_days": KEEP_DAYS}))
+    print(f"현재 용량 {MB(cur)} / 목표 {MB(TARGET)} · 정리 후보 {left:,}편")
 
-    # 1단계는 용량과 무관하게 항상 수행한다. 초록을 비워도 논문은 목록에 남고,
-    # 누군가 그 논문을 열면 PubMed에서 초록을 자동으로 되받아 온다.
-    total = 0
-    while True:
-        n = int(rpc("prune_slim", {"keep_days": KEEP_DAYS, "batch": BATCH}))
-        if n == 0:
-            break
-        total += n
-        print(f"[초록 비우기] {n}편 (누적 {total})", flush=True)
-    if total:
-        cur = size()
-        print(f"초록 비우기 완료: {total}편 → {mb(cur)}")
+    if left:
+        done = run_stage("prune_slim", "초록 비우기")
+        print(f"초록 비우기 완료: {done:,}편")
     else:
         print("초록 비울 논문 없음")
 
-    # 2단계는 그래도 목표를 넘을 때만. 이미 초록이 비워진 논문만 지운다(언제든 재수집 가능).
-    while cur > TARGET:
-        n = int(rpc("prune_delete", {"keep_days": KEEP_DAYS, "batch": BATCH}))
-        if n == 0:
-            print("[행 삭제] 더 지울 논문 없음")
-            break
-        cur = size()
-        print(f"[행 삭제] {n}편 → {mb(cur)}", flush=True)
-
+    cur = size()
     if cur > TARGET:
-        print(f"경고: 목표 초과 ({mb(cur)}). 보호 대상이 많거나 PRUNE_KEEP_DAYS가 깁니다.", file=sys.stderr)
-    print(f"완료 — 최종 {mb(cur)}")
+        print(f"용량이 여전히 {MB(cur)} — 이미 비워진 오래된 논문 행을 삭제합니다")
+        done = run_stage("prune_delete", "행 삭제")
+        print(f"행 삭제 완료: {done:,}편")
+        cur = size()
+
+    print(f"최종 용량 {MB(cur)}")
+    if cur > TARGET:
+        print("파일 크기는 VACUUM 전까지 줄지 않습니다. Supabase SQL Editor에서 다음을 한 번 실행하세요:", file=sys.stderr)
+        print("  vacuum (full, analyze) public.papers;", file=sys.stderr)
 
 
 if __name__ == "__main__":
