@@ -198,6 +198,8 @@ Actions → Fetch PubMed papers → Run workflow에서 `lookback_days`를 크게
 
 **조정**: Settings → Secrets and variables → Actions → **Variables** 탭에서 `PRUNE_KEEP_DAYS`(기본 365, 줄일수록 껍데기화가 공격적), `PRUNE_TARGET_MB`(기본 420), `PRUNE_BATCH`(기본 200).
 
+**수만 편을 한 번에 정리할 때**: 매일 작업은 조금씩만 처리합니다(대량 수정은 전문검색 인덱스 때문에 매우 느립니다). 정리 후보가 수만 편이면 Supabase SQL Editor에서 `supabase/maintenance_bulk_prune.sql` 을 통째로 붙여넣고 한 번 실행하세요. 인덱스를 잠시 내리고 일괄 처리한 뒤 되살리고 VACUUM까지 합니다(8만 편 기준 3~10분).
+
 **중요 — 정리 후 용량이 안 줄어 보일 때**: PostgreSQL은 초록을 비우거나 행을 지워도 파일 크기가 즉시 줄지 않고 빈 공간으로 남겨 재사용합니다. 그래서 정리 직후 Admin의 사용 용량이 그대로일 수 있습니다. 실제로 회수하려면 SQL Editor에서 한 번 실행하세요(수 분 걸리고 그동안 쓰기가 잠깁니다):
 ```sql
 vacuum (full, analyze) public.papers;

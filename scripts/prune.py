@@ -22,6 +22,7 @@ H = {"apikey": KEY, "Authorization": f"Bearer {KEY}", "Content-Type": "applicati
 TARGET = int(os.environ.get("PRUNE_TARGET_MB") or 420) * 1024 * 1024
 KEEP_DAYS = int(os.environ.get("PRUNE_KEEP_DAYS") or 365)
 BATCH0 = int(os.environ.get("PRUNE_BATCH") or 200)
+BULK_LIMIT = int(os.environ.get("PRUNE_BULK_LIMIT") or 5000)  # 이보다 후보가 많으면 SQL 일괄 정리를 권함
 MB = lambda b: f"{b / 1024 / 1024:.0f}MB"
 
 
@@ -43,10 +44,16 @@ def run_stage(fn, label):
         try:
             n = int(rpc(fn, {"keep_days": KEEP_DAYS, "batch": batch}))
         except RuntimeError as e:
-            if is_timeout(e) and batch > 25:
+            if is_timeout(e) and batch > 10:
                 batch //= 2
                 print(f"[{label}] 시간 초과 → 배치 {batch}로 축소", flush=True)
                 continue
+            if is_timeout(e):
+                # 더 줄일 수 없으면 이번 실행은 여기까지. 워크플로를 실패시키지 않는다.
+                print(f"[{label}] 시간 초과로 중단 (누적 {total}편). "
+                      "남은 양이 많으면 supabase/maintenance_bulk_prune.sql 을 SQL Editor에서 한 번 실행하세요.",
+                      file=sys.stderr)
+                return total
             raise
         if n == 0:
             misses += 1
@@ -66,6 +73,10 @@ def main():
     left = int(rpc("prunable_count", {"keep_days": KEEP_DAYS}))
     print(f"현재 용량 {MB(cur)} / 목표 {MB(TARGET)} · 정리 후보 {left:,}편")
 
+    if left > BULK_LIMIT:
+        print(f"후보가 {left:,}편으로 많습니다. 매일 작업에서 조금씩 처리하는 것보다,")
+        print("Supabase SQL Editor에서 supabase/maintenance_bulk_prune.sql 을 한 번 실행하는 편이 빠릅니다.")
+        print(f"이번 실행에서는 {BATCH0 * 20:,}편까지만 처리합니다.")
     if left:
         done = run_stage("prune_slim", "초록 비우기")
         print(f"초록 비우기 완료: {done:,}편")
@@ -86,4 +97,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:  # 정리 실패가 수집·추천까지 막지 않도록
+        print(f"정리 중단: {e}", file=sys.stderr)
